@@ -1,0 +1,25 @@
+<launch>
+  <arg name="robot_ip" default="172.16.0.2"/>
+  <arg name="load_gripper" default="true"/>
+  <arg name="target_x" default="2.0"/>
+  <arg name="target_y" default="0.0"/>
+  <arg name="target_z" default="0.0"/>
+  <arg name="start_delay" default="0.2"/>
+  <arg name="action_server" default="/position_joint_trajectory_controller/follow_joint_trajectory"/>
+  <arg name="print_only" default="false"/>
+
+  <include file="$(find soft_throw)/launch/panda_traj.launch">
+    <arg name="robot_ip" value="$(arg robot_ip)"/>
+    <arg name="load_gripper" value="$(arg load_gripper)"/>
+  </include>
+
+  <node pkg="soft_throw"
+        type="run_min_throw_real.py"
+        name="min_throw_sender"
+        output="screen">
+    <param name="target" value="[$(arg target_x), $(arg target_y), $(arg target_z)]"/>
+    <param name="start_delay" value="$(arg start_delay)"/>
+    <param name="action_server" value="$(arg action_server)"/>
+    <param name="print_only" value="$(arg print_only)"/>
+  </node>
+</launch>

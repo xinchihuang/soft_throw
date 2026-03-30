@@ -1,0 +1,49 @@
+Franka Panda (FER) Limits
+Source: Franka Control Interface (FCI) documentation, "Limits for Franka Emika Robot (FER)"
+
+1) Joint position limits
+q1: [-2.897,  2.897] rad   ([-166°, 166°])
+q2: [-1.762,  1.762] rad   ([-101°, 101°])
+q3: [-2.897,  2.897] rad   ([-166°, 166°])
+q4: [-3.071, -0.070] rad   ([-176°,  -4°])
+q5: [-2.897,  2.897] rad   ([-166°, 166°])
+q6: [-0.017,  3.752] rad   ([ -1°, 215°])
+q7: [-2.897,  2.897] rad   ([-166°, 166°])
+
+2) Joint velocity limits
+dq_max = [2.1750, 2.1750, 2.1750, 2.1750, 2.6100, 2.6100, 2.6100] rad/s
+
+Per joint:
+q1_dot_max: 2.1750 rad/s
+q2_dot_max: 2.1750 rad/s
+q3_dot_max: 2.1750 rad/s
+q4_dot_max: 2.1750 rad/s
+q5_dot_max: 2.6100 rad/s
+q6_dot_max: 2.6100 rad/s
+q7_dot_max: 2.6100 rad/s
+
+3) Joint acceleration limits
+ddq_max = [15.0, 7.5, 10.0, 12.5, 15.0, 20.0, 20.0] rad/s^2
+
+Per joint:
+q1_ddot_max: 15.0 rad/s^2
+q2_ddot_max: 7.5 rad/s^2
+q3_ddot_max: 10.0 rad/s^2
+q4_ddot_max: 12.5 rad/s^2
+q5_ddot_max: 15.0 rad/s^2
+q6_ddot_max: 20.0 rad/s^2
+q7_ddot_max: 20.0 rad/s^2
+
+4) Cartesian limits
+translation velocity max:    1.7 m/s
+rotation velocity max:       2.5 rad/s
+elbow velocity max:          2.1750 rad/s
+
+translation acceleration max: 13.0 m/s^2
+rotation acceleration max:    25.0 rad/s^2
+elbow acceleration max:       10.0 rad/s^2
+
+5) Notes
+- Joint 4 is always negative and does not reach 0.
+- Joint 6 is asymmetric and mostly positive.
+- For safety, Franka also uses position-dependent velocity limits near joint boundaries.

@@ -1,0 +1,24 @@
+<!-- launch/panda_traj.launch -->
+<launch>
+  <arg name="robot_ip"  default="172.16.0.2"/>
+  <arg name="load_gripper" default="true"/>
+
+  <!-- 1. Start franka_control (talks to robot over FCI) -->
+  <include file="$(find franka_control)/launch/franka_control.launch">
+    <arg name="robot_ip"     value="$(arg robot_ip)"/>
+    <arg name="load_gripper" value="$(arg load_gripper)"/>
+  </include>
+
+  <!-- 2. Load controller config onto param server -->
+  <rosparam file="$(find soft_throw)/config/controllers.yaml"
+            command="load"/>
+
+  <!-- 3. Spawn the trajectory controller -->
+  <node name="controller_spawner"
+        pkg="controller_manager"
+        type="spawner"
+        respawn="false"
+        output="screen"
+        args="position_joint_trajectory_controller"/>
+
+</launch>

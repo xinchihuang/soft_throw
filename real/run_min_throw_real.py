@@ -29,6 +29,8 @@ from core.throw_params import (
     Q_LIMITS_7,
 )
 from core.kinematics_pin import PinKinematics, pin
+from core.ik_poly5_core import solve_ik_for_q_goal, poly5_trajectory
+from sim.plot_joint_traces import plot_from_csv
 
 
 JOINT_NAMES = [
@@ -55,92 +57,13 @@ def _effective_q_limits() -> Tuple[np.ndarray, np.ndarray]:
     return q_min, q_max
 
 
-def _plot_joint_commands(points, output_dir: Path) -> None:
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
-        print("[plot] matplotlib not available; skipping plots", flush=True)
-        return
-
-    if not points:
-        print("[plot] no trajectory points available; skipping plots", flush=True)
-        return
-
+def _save_csv_and_plot(t, q, qdot, u, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    t = np.asarray([pt[3] for pt in points], dtype=float)
-    q = np.asarray([pt[0] for pt in points], dtype=float)
-    qdot = np.asarray([pt[1] for pt in points], dtype=float)
-    qddot = np.asarray([pt[2] for pt in points], dtype=float)
-
-    fig_pos, axes_pos = plt.subplots(7, 1, figsize=(12, 16), sharex=True)
-    for idx, ax in enumerate(np.atleast_1d(axes_pos)):
-        ax.plot(t, q[:, idx], linewidth=1.5)
-        ax.axhline(Q_LIMITS_7[idx, 0], linestyle="--", linewidth=1.0, color="tab:red")
-        ax.axhline(Q_LIMITS_7[idx, 1], linestyle="--", linewidth=1.0, color="tab:red")
-        ax.set_ylabel(f"q{idx+1} [rad]")
-        ax.set_title(JOINT_NAMES[idx], loc="left")
-        ax.grid(True, alpha=0.3)
-    axes_pos[-1].set_xlabel("Trajectory time_from_start [s]")
-    fig_pos.suptitle("Commanded Joint Positions")
-    fig_pos.tight_layout()
-    pos_path = output_dir / "real_joint_positions.png"
-    fig_pos.savefig(pos_path, dpi=150)
-
-    fig_vel, axes_vel = plt.subplots(7, 1, figsize=(12, 16), sharex=True)
-    for idx, ax in enumerate(np.atleast_1d(axes_vel)):
-        ax.plot(t, qdot[:, idx], linewidth=1.5)
-        ax.axhline(LIMIT_SCALE * QDOT_LIMITS_7[idx], linestyle="--", linewidth=1.0, color="tab:red")
-        ax.axhline(-(LIMIT_SCALE * QDOT_LIMITS_7[idx]), linestyle="--", linewidth=1.0, color="tab:red")
-        ax.set_ylabel(f"dq{idx+1} [rad/s]")
-        ax.set_title(JOINT_NAMES[idx], loc="left")
-        ax.grid(True, alpha=0.3)
-    axes_vel[-1].set_xlabel("Trajectory time_from_start [s]")
-    fig_vel.suptitle("Commanded Joint Velocities")
-    fig_vel.tight_layout()
-    vel_path = output_dir / "real_joint_velocities.png"
-    fig_vel.savefig(vel_path, dpi=150)
-
-    fig_vel_scatter, axes_vel_scatter = plt.subplots(7, 1, figsize=(12, 16), sharex=True)
-    for idx, ax in enumerate(np.atleast_1d(axes_vel_scatter)):
-        ax.scatter(t, qdot[:, idx], s=8)
-        ax.axhline(LIMIT_SCALE * QDOT_LIMITS_7[idx], linestyle="--", linewidth=1.0, color="tab:red")
-        ax.axhline(-(LIMIT_SCALE * QDOT_LIMITS_7[idx]), linestyle="--", linewidth=1.0, color="tab:red")
-        ax.set_ylabel(f"dq{idx+1} [rad/s]")
-        ax.set_title(JOINT_NAMES[idx], loc="left")
-        ax.grid(True, alpha=0.3)
-    axes_vel_scatter[-1].set_xlabel("Trajectory time_from_start [s]")
-    fig_vel_scatter.suptitle("Commanded Joint Velocities (Scatter)")
-    fig_vel_scatter.tight_layout()
-    vel_scatter_path = output_dir / "real_joint_velocities_scatter.png"
-    fig_vel_scatter.savefig(vel_scatter_path, dpi=150)
-
-    fig_acc, axes_acc = plt.subplots(7, 1, figsize=(12, 16), sharex=True)
-    for idx, ax in enumerate(np.atleast_1d(axes_acc)):
-        ax.plot(t, qddot[:, idx], linewidth=1.5)
-        ax.axhline(LIMIT_SCALE * QDDOT_LIMITS_7[idx], linestyle="--", linewidth=1.0, color="tab:red")
-        ax.axhline(-(LIMIT_SCALE * QDDOT_LIMITS_7[idx]), linestyle="--", linewidth=1.0, color="tab:red")
-        ax.set_ylabel(f"ddq{idx+1} [rad/s^2]")
-        ax.set_title(JOINT_NAMES[idx], loc="left")
-        ax.grid(True, alpha=0.3)
-    axes_acc[-1].set_xlabel("Trajectory time_from_start [s]")
-    fig_acc.suptitle("Commanded Joint Accelerations")
-    fig_acc.tight_layout()
-    acc_path = output_dir / "real_joint_accelerations.png"
-    fig_acc.savefig(acc_path, dpi=150)
-
-    plt.close(fig_pos)
-    plt.close(fig_vel)
-    plt.close(fig_vel_scatter)
-    plt.close(fig_acc)
-
-    print(f"[plot] saved {pos_path}", flush=True)
-    print(f"[plot] saved {vel_path}", flush=True)
-    print(f"[plot] saved {vel_scatter_path}", flush=True)
-    print(f"[plot] saved {acc_path}", flush=True)
+    csv_path = output_dir / "joint_traces.csv"
+    header = ["t"] + [f"q{j+1}" for j in range(7)] + [f"qdot{j+1}" for j in range(7)] + [f"u{j+1}" for j in range(7)]
+    data = np.column_stack([t, q, qdot, u])
+    np.savetxt(csv_path, data, delimiter=",", header=",".join(header), comments="")
+    plot_from_csv(str(csv_path), str(output_dir))
 
 
 def _append_point(points, positions, velocities, time_from_start: float) -> None:
@@ -318,12 +241,7 @@ def _build_execution_trajectory(
     target_pose_vel: np.ndarray,
     start_q7: np.ndarray,
     hold_sec: float,
-    max_iter: int,
-    kp_pos: float,
-    kp_rot: float,
-    ik_tol_pos: float,
-    ik_tol_rot: float,
-) -> Tuple[List[Tuple[np.ndarray, np.ndarray, np.ndarray, float]], np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     pin_model = PinKinematics()
     target_frame = "panda_link7"
     target_frame_id = pin_model.model.getFrameId(target_frame)
@@ -335,56 +253,54 @@ def _build_execution_trajectory(
     v_j7_des = pose[3:]
 
     q_min, q_max = _effective_q_limits()
-    q_cmd7 = np.clip(np.asarray(start_q7, dtype=float).reshape(7), q_min, q_max)
-    qdot_prev = np.zeros(7, dtype=float)
-    points: List[Tuple[np.ndarray, np.ndarray, np.ndarray, float]] = []
-    time_from_start = 0.0
+    q_start = np.clip(np.asarray(start_q7, dtype=float).reshape(7), q_min, q_max)
 
-    q_full = pin_model.make_q_full_from_arm7(q_cmd7)
+    q_full = pin_model.make_q_full_from_arm7(q_start)
     pin.forwardKinematics(pin_model.model, pin_model.data, q_full)
     pin.updateFramePlacements(pin_model.model, pin_model.data)
     T0 = pin_model.data.oMf[target_frame_id]
     R_j7_des = np.array(T0.rotation, dtype=float)
 
-    for _ in range(max_iter):
-        q_full = pin_model.make_q_full_from_arm7(q_cmd7)
-        pin.forwardKinematics(pin_model.model, pin_model.data, q_full)
-        pin.updateFramePlacements(pin_model.model, pin_model.data)
-        T = pin_model.data.oMf[target_frame_id]
-        p_cur = np.array(T.translation, dtype=float)
-        R_cur = np.array(T.rotation, dtype=float)
+    q_goal = solve_ik_for_q_goal(
+        pin_model,
+        target_frame_id,
+        q_start,
+        p_j7_des,
+        R_j7_des,
+        Q_LIMITS_7,
+        QDOT_LIMITS_7,
+        QDDOT_LIMITS_7,
+        control_dt=0.01,
+        max_iter=300,
+        kp_pos=2.0,
+        kp_rot=1.0,
+        v_j7_des=v_j7_des,
+    )
 
-        ep = p_j7_des - p_cur
-        eR = pin.log3(R_cur.T @ R_j7_des)
-        if np.linalg.norm(ep) < ik_tol_pos and np.linalg.norm(eR) < ik_tol_rot:
-            break
+    t, q, qdot, qddot, u = poly5_trajectory(
+        q_start,
+        q_goal,
+        Q_LIMITS_7,
+        QDOT_LIMITS_7,
+        QDDOT_LIMITS_7,
+        control_dt=0.01,
+    )
 
-        J_arm = _build_jacobian_arm7(pin_model, q_cmd7, target_frame_id)
-        lam = 0.05
-        JJt = J_arm @ J_arm.T
-        J_pinv = J_arm.T @ np.linalg.inv(JJt + (lam * lam) * np.eye(6))
+    # append hold segment
+    if hold_sec > 0:
+        n_hold = max(1, int(np.ceil(hold_sec / 0.01)))
+        t_hold = t[-1] + np.arange(1, n_hold + 1) * 0.01
+        q_hold = np.repeat(q[-1][None, :], n_hold, axis=0)
+        qdot_hold = np.zeros_like(q_hold)
+        qddot_hold = np.zeros_like(q_hold)
+        u_hold = np.zeros_like(q_hold)
+        t = np.concatenate([t, t_hold])
+        q = np.concatenate([q, q_hold])
+        qdot = np.concatenate([qdot, qdot_hold])
+        qddot = np.concatenate([qddot, qddot_hold])
+        u = np.concatenate([u, u_hold])
 
-        v_cmd = v_j7_des + kp_pos * ep
-        w_cmd = kp_rot * eR
-        qdot_des = J_pinv @ np.concatenate([v_cmd, w_cmd])
-        qdot7 = _safe_step_velocity(q_cmd7, qdot_des, qdot_prev)
-        qdot7 = _clip_cartesian_speed(pin_model, q_cmd7, qdot7)
-        qdot7 = _safe_step_velocity(q_cmd7, qdot7, qdot_prev)
-
-        q_next = q_cmd7 + qdot7 * DT_CONTROL
-        qdot_prev = qdot7.copy()
-        time_from_start = _append_dense_segment(
-            points,
-            q_start=q_cmd7,
-            q_end=q_next,
-            qdot_start=np.zeros(7, dtype=float) if not points else points[-1][1],
-            qdot_end=qdot7,
-            time_from_start=time_from_start,
-        )
-        q_cmd7 = q_next
-
-    time_from_start = _append_hold(points, q_cmd7, hold_sec, time_from_start)
-    return _postprocess_trajectory(points), q_cmd7
+    return t, q, qdot, qddot, u
 
 
 def _send_ros_trajectory(points, action_server: str, start_delay: float):
@@ -447,11 +363,8 @@ def _resolve_args():
     parser.add_argument("--action-server", default=DEFAULT_ACTION_SERVER)
     parser.add_argument("--start-delay", type=float, default=0.2)
     parser.add_argument("--hold-sec", type=float, default=1.0)
-    parser.add_argument("--max-iter", type=int, default=300)
-    parser.add_argument("--kp-pos", type=float, default=2.0)
-    parser.add_argument("--kp-rot", type=float, default=1.0)
-    parser.add_argument("--ik-tol-pos", type=float, default=1e-3)
-    parser.add_argument("--ik-tol-rot", type=float, default=1e-3)
+    # IK parameters removed (handled inside core.ik_poly5_core)
+    # IK tolerances removed (handled inside core.ik_poly5_core)
     parser.add_argument(
         "--plot-dir",
         default=str(_ROOT),
@@ -479,28 +392,25 @@ def main():
         start_q7 = _read_current_joint_pos7()
 
     reset_points, q_reset = _build_reset_trajectory(start_q7=start_q7)
-    exec_points, q_final = _build_execution_trajectory(
+    t_exec, q_exec, qdot_exec, qddot_exec, u_exec = _build_execution_trajectory(
         target_pose_vel=np.asarray(args.pose_joint7_vel, dtype=float),
         start_q7=q_reset,
         hold_sec=float(args.hold_sec),
-        max_iter=int(args.max_iter),
-        kp_pos=float(args.kp_pos),
-        kp_rot=float(args.kp_rot),
-        ik_tol_pos=float(args.ik_tol_pos),
-        ik_tol_rot=float(args.ik_tol_rot),
     )
-    points = reset_points + [
-        (q.copy(), qdot.copy(), qddot.copy(), float(t + reset_points[-1][3]))
-        for q, qdot, qddot, t in exec_points
-    ]
+    # Build points list for ROS
+    points = reset_points.copy()
+    t_offset = float(reset_points[-1][3]) if reset_points else 0.0
+    for i in range(len(t_exec)):
+        points.append((q_exec[i], qdot_exec[i], qddot_exec[i], float(t_exec[i] + t_offset)))
 
     print(f"[plan] built {len(points)} trajectory points", flush=True)
-    print(f"[plan] final_q_cmd7={q_final.tolist()}", flush=True)
-    _plot_joint_commands(points, Path(args.plot_dir))
+    print(f"[plan] final_q_cmd7={q_exec[-1].tolist()}", flush=True)
+    _save_csv_and_plot(t_exec, q_exec, qdot_exec, u_exec, Path(args.plot_dir))
 
     if args.print_only:
         return
 
+    exec_points = [(q_exec[i], qdot_exec[i], qddot_exec[i], float(t_exec[i])) for i in range(len(t_exec))]
     _send_ros_trajectory(
         points=reset_points,
         action_server=args.action_server,

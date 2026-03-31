@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Plot joint traces from CSV produced by run_min_throw_sim.py."""
+"""Plot joint traces from CSV produced by the sim/real runners."""
 
 import os
 import numpy as np
@@ -18,15 +18,15 @@ def plot_from_csv(csv_path, out_dir):
     t = data[:, 0]
     q = data[:, 1:8]
     qdot = data[:, 8:15]
-    u = data[:, 15:22]
+    qddot = data[:, 15:22]
 
     os.makedirs(out_dir, exist_ok=True)
 
-    for j in [1, 3, 5]:
+    for j in range(7):
         fig, axes = plt.subplots(3, 1, figsize=(9, 9), sharex=True)
         axes[0].scatter(t, q[:, j], s=6, label=f"q{j+1}")
         axes[1].scatter(t, qdot[:, j], s=6, label=f"qdot{j+1}")
-        axes[2].scatter(t, u[:, j], s=6, label=f"u{j+1}")
+        axes[2].scatter(t, qddot[:, j], s=6, label=f"qddot{j+1}")
 
         q_min, q_max = Q_LIMITS_7[j]
         qd_max = QDOT_LIMITS_7[j]
@@ -40,7 +40,7 @@ def plot_from_csv(csv_path, out_dir):
 
         axes[0].set_ylabel("q (rad)")
         axes[1].set_ylabel("qdot (rad/s)")
-        axes[2].set_ylabel("u (rad/s)")
+        axes[2].set_ylabel("qddot (rad/s^2)")
         axes[2].set_xlabel("time (s)")
         for ax in axes:
             ax.grid(True, alpha=0.3)

@@ -29,8 +29,9 @@ EE_FRAME = "panda_link8"   # end-effector frame
 # ============================================================
 # TRAIN / CONTROL CONFIG
 # ============================================================
-CONTROL_HZ = 30.0
+CONTROL_HZ = 100.0
 DT_CONTROL = 1.0 / CONTROL_HZ
+WAYPOINT_DENSITY = 10
 
 # For speed: keep this low. If you set this high, raising CONTROL_HZ will slow wall-clock.
 SIM_UPDATES_PER_STEP = 1
@@ -154,7 +155,7 @@ BALL_RESET_POS_WORLD = (-0.75, 0.0, 0.6)  # user requirement
 RESET_BALL_WAIT_SEC = 3.0    # after ball reset wait 2s then execute
 
 # Arm poses
-INIT_ARM = np.array([0.0, -1.57, 0.0, +1.57, 0.0, 3.14, 0.0], dtype=float)
+INIT_ARM = np.array([0.0, -1., 0.0, +1.57, 0.0, 3.14, 0.0], dtype=float)
 
 
 # Prep trajectory from INIT -> THROW_START

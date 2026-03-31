@@ -21,6 +21,7 @@ if str(_ROOT) not in sys.path:
 
 from core.throw_params import (
     DT_CONTROL,
+    WAYPOINT_DENSITY,
     RESET_ARM_SETTLE_SEC,
     RESET_BALL_WAIT_SEC,
     INIT_ARM,
@@ -46,7 +47,6 @@ JOINT_NAMES = [
 DEFAULT_ACTION_SERVER = "/position_joint_trajectory_controller/follow_joint_trajectory"
 LIMIT_SCALE = 0.1
 EE_SPEED_LIMIT = 0.2
-WAYPOINT_DENSITY = 8
 JOINT_LIMIT_MARGIN = 0.2
 SMOOTHING_WINDOW = 9
 
@@ -57,13 +57,21 @@ def _effective_q_limits() -> Tuple[np.ndarray, np.ndarray]:
     return q_min, q_max
 
 
-def _save_csv_and_plot(t, q, qdot, u, output_dir: Path) -> None:
+def _save_csv_and_plot(t, q, qdot, qddot, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "joint_traces.csv"
-    header = ["t"] + [f"q{j+1}" for j in range(7)] + [f"qdot{j+1}" for j in range(7)] + [f"u{j+1}" for j in range(7)]
-    data = np.column_stack([t, q, qdot, u])
+    header = ["t"] + [f"q{j}" for j in range(7)] + [f"dq{j}" for j in range(7)] + [f"ddq{j}" for j in range(7)]
+    data = np.column_stack([t, q, qdot, qddot])
     np.savetxt(csv_path, data, delimiter=",", header=",".join(header), comments="")
     plot_from_csv(str(csv_path), str(output_dir))
+
+
+def _points_to_arrays(points):
+    t = np.asarray([pt[3] for pt in points], dtype=float)
+    q = np.asarray([pt[0] for pt in points], dtype=float)
+    qdot = np.asarray([pt[1] for pt in points], dtype=float)
+    qddot = np.asarray([pt[2] for pt in points], dtype=float)
+    return t, q, qdot, qddot
 
 
 def _append_point(points, positions, velocities, time_from_start: float) -> None:
@@ -241,6 +249,7 @@ def _build_execution_trajectory(
     target_pose_vel: np.ndarray,
     start_q7: np.ndarray,
     hold_sec: float,
+    control_dt: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     pin_model = PinKinematics()
     target_frame = "panda_link7"
@@ -270,7 +279,7 @@ def _build_execution_trajectory(
         Q_LIMITS_7,
         QDOT_LIMITS_7,
         QDDOT_LIMITS_7,
-        control_dt=0.01,
+        control_dt=control_dt,
         max_iter=300,
         kp_pos=2.0,
         kp_rot=1.0,
@@ -283,13 +292,13 @@ def _build_execution_trajectory(
         Q_LIMITS_7,
         QDOT_LIMITS_7,
         QDDOT_LIMITS_7,
-        control_dt=0.01,
+        control_dt=control_dt,
     )
 
     # append hold segment
     if hold_sec > 0:
-        n_hold = max(1, int(np.ceil(hold_sec / 0.01)))
-        t_hold = t[-1] + np.arange(1, n_hold + 1) * 0.01
+        n_hold = max(1, int(np.ceil(hold_sec / control_dt)))
+        t_hold = t[-1] + np.arange(1, n_hold + 1) * control_dt
         q_hold = np.repeat(q[-1][None, :], n_hold, axis=0)
         qdot_hold = np.zeros_like(q_hold)
         qddot_hold = np.zeros_like(q_hold)
@@ -396,6 +405,7 @@ def main():
         target_pose_vel=np.asarray(args.pose_joint7_vel, dtype=float),
         start_q7=q_reset,
         hold_sec=float(args.hold_sec),
+        control_dt=DT_CONTROL,
     )
     # Build points list for ROS
     points = reset_points.copy()
@@ -405,7 +415,7 @@ def main():
 
     print(f"[plan] built {len(points)} trajectory points", flush=True)
     print(f"[plan] final_q_cmd7={q_exec[-1].tolist()}", flush=True)
-    _save_csv_and_plot(t_exec, q_exec, qdot_exec, u_exec, Path(args.plot_dir))
+    _save_csv_and_plot(t_exec, q_exec, qdot_exec, qddot_exec, Path(args.plot_dir))
 
     if args.print_only:
         return

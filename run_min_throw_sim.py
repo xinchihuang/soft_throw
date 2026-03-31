@@ -20,6 +20,13 @@ if str(_ROOT) not in sys.path:
 from isaaclab.app import AppLauncher
 
 
+def _append_trace_sample(t_hist, q_hist, qdot_hist, qddot_hist, t_now, q_now, qdot_now, qddot_now):
+    t_hist.append(float(t_now))
+    q_hist.append(np.asarray(q_now, dtype=float).copy())
+    qdot_hist.append(np.asarray(qdot_now, dtype=float).copy())
+    qddot_hist.append(np.asarray(qddot_now, dtype=float).copy())
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pose_j7_vel", type=float, nargs=6, required=True,
@@ -94,15 +101,15 @@ def main():
     # Reset arm
     q_cmd7 = INIT_ARM.copy()
     qdot7 = np.zeros(7, dtype=float)
-    t0 = time.time()
-    while time.time() - t0 < RESET_ARM_SETTLE_SEC:
+    n_reset = max(1, int(np.ceil(RESET_ARM_SETTLE_SEC / DT_CONTROL)))
+    for _ in range(n_reset):
         apply_arm_targets(stage, joint_paths, q_cmd7, qdot7)
         simulation_app.update()
 
     # Ball reset (kept for scene consistency)
     reset_ball(stage, BALL_RESET_POS_WORLD)
-    t1 = time.time()
-    while time.time() - t1 < RESET_BALL_WAIT_SEC:
+    n_wait = max(1, int(np.ceil(RESET_BALL_WAIT_SEC / DT_CONTROL)))
+    for _ in range(n_wait):
         apply_arm_targets(stage, joint_paths, q_cmd7, qdot7)
         simulation_app.update()
 
@@ -145,7 +152,7 @@ def main():
         Q_LIMITS_7,
         QDOT_LIMITS_7,
         QDDOT_LIMITS_7,
-        control_dt=0.01,
+        control_dt=DT_CONTROL,
         max_iter=300,
         kp_pos=2.0,
         kp_rot=1.0,
@@ -159,26 +166,37 @@ def main():
         Q_LIMITS_7,
         QDOT_LIMITS_7,
         QDDOT_LIMITS_7,
-        control_dt=0.01,
+        control_dt=DT_CONTROL,
     )
+
+    trace_t = []
+    trace_q = []
+    trace_qdot = []
+    trace_qddot = []
 
     # Execute trajectory
     for k in range(len(t)):
         apply_arm_targets(stage, joint_paths, q[k], qdot[k])
+        _append_trace_sample(trace_t, trace_q, trace_qdot, trace_qddot, t[k], q[k], qdot[k], qddot[k])
         for _ in range(SIM_UPDATES_PER_STEP):
             simulation_app.update()
 
-    # Hold
-    t2 = time.time()
-    while time.time() - t2 < 1.0:
+    # Hold after execution, but do not record it
+    n_hold = max(1, int(np.ceil(1.0 / DT_CONTROL)))
+    for _ in range(n_hold):
         apply_arm_targets(stage, joint_paths, q[-1], np.zeros(7, dtype=float))
         simulation_app.update()
 
     # Save CSV for plotting
     out_dir = (Path(__file__).resolve().parents[1] / "outputs").as_posix()
     csv_path = Path(out_dir) / "joint_traces.csv"
-    header = ["t"] + [f"q{j+1}" for j in range(7)] + [f"qdot{j+1}" for j in range(7)] + [f"u{j+1}" for j in range(7)]
-    data = np.column_stack([t, q, qdot, u])
+    header = ["t"] + [f"q{j}" for j in range(7)] + [f"dq{j}" for j in range(7)] + [f"ddq{j}" for j in range(7)]
+    data = np.column_stack([
+        np.asarray(trace_t, dtype=float),
+        np.asarray(trace_q, dtype=float),
+        np.asarray(trace_qdot, dtype=float),
+        np.asarray(trace_qddot, dtype=float),
+    ])
     np.savetxt(str(csv_path), data, delimiter=",", header=",".join(header), comments="")
 
     # Plot

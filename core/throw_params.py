@@ -155,7 +155,13 @@ BALL_RESET_POS_WORLD = (-0.75, 0.0, 0.6)  # user requirement
 RESET_BALL_WAIT_SEC = 3.0    # after ball reset wait 2s then execute
 
 # Arm poses
-INIT_ARM = np.array([0.0, -1., 0.0, +1.57, 0.0, 3.14, 0.0], dtype=float)
+INIT_ARM = np.array([0.0, -1.57, 0.0, +1.57, 0.0, 3.14, 0.0], dtype=float)
+# Optional arm reset position in world coordinates (x, y, z). If set, IK is used to
+# compute reset joint angles from this position using the current orientation.
+RESET_ARM_POS_WORLD = np.array([-0.1460463326, 0.0, 0.0313403997], dtype=float)
+
+# Path planning (task-space) before IK: number of waypoints from start to goal (inclusive).
+PATH_PLAN_WAYPOINTS = 5
 
 
 # Prep trajectory from INIT -> THROW_START

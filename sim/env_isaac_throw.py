@@ -25,6 +25,9 @@ from core.throw_params import (
     SIM_UPDATES_PER_STEP,
     LEARN_JIDX,
     QDOT_LIMITS_3,
+    Q_LIMITS_7,
+    QDOT_LIMITS_7,
+    QDDOT_LIMITS_7,
     ACTION_EMA_ALPHA,
     EE_VEL_MAX,
     USE_TUBE_BASELINE,
@@ -43,6 +46,7 @@ from core.throw_params import (
     RESET_BALL_WAIT_SEC,
     BALL_DETACH_DIST,
     INIT_ARM,
+    RESET_ARM_POS_WORLD,
     THROW_START_Q,
     PREP_STEPS,
     JOINT0_ALIGN_STEPS,
@@ -59,6 +63,7 @@ from core.throw_params import (
 )
 
 from core.kinematics_pin import PinKinematics
+from core.ik_poly5_core import solve_ik_for_reset_pos
 from core.rewards import landing_reward
 from core.targets import sample_target_xyz
 from core.tube_accel_planner import tube_acceleration_select_release
@@ -321,9 +326,25 @@ class SpoonThrowEnvCoreTubeRandomYawAlign(gym.Env):
 
         self._clear_recording_buffers()
 
+        reset_q = INIT_ARM.copy()
+        if RESET_ARM_POS_WORLD is not None:
+            reset_frame_id = self.pin.model.getFrameId("panda_link7")
+            if reset_frame_id == len(self.pin.model.frames):
+                raise RuntimeError("[pin] reset frame not found: panda_link7")
+            reset_q, _ = solve_ik_for_reset_pos(
+                self.pin,
+                reset_q,
+                RESET_ARM_POS_WORLD,
+                Q_LIMITS_7,
+                QDOT_LIMITS_7,
+                QDDOT_LIMITS_7,
+                control_dt=DT_CONTROL,
+                target_frame_id=reset_frame_id,
+            )
+
         # --------- REQUIRED RESET ORDER ----------
         # 1) arm -> INIT, hold 2s
-        self.q_cmd7 = INIT_ARM.copy()
+        self.q_cmd7 = reset_q.copy()
         self.qdot7[:] = 0.0
 
         t0 = time.time()
@@ -355,11 +376,11 @@ class SpoonThrowEnvCoreTubeRandomYawAlign(gym.Env):
         self.throw_start_q[0] = yaw  # joint0
 
         # 6a) move only joint0 first: INIT -> yaw-aligned pose
-        q_yaw = INIT_ARM.copy()
+        q_yaw = reset_q.copy()
         q_yaw[0] = yaw
         for k in range(JOINT0_ALIGN_STEPS):
             alpha = (k + 1) / float(JOINT0_ALIGN_STEPS)
-            q = (1 - alpha) * INIT_ARM + alpha * q_yaw
+            q = (1 - alpha) * reset_q + alpha * q_yaw
             self.q_cmd7 = q.copy()
             self.qdot7[:] = 0.0
             apply_arm_targets(self.stage, self.joint_paths, self.q_cmd7, self.qdot7)

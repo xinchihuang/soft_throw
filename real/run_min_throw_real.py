@@ -25,12 +25,14 @@ from core.throw_params import (
     RESET_ARM_SETTLE_SEC,
     RESET_BALL_WAIT_SEC,
     INIT_ARM,
+    RESET_ARM_POS_WORLD,
     QDOT_LIMITS_7,
     QDDOT_LIMITS_7,
     Q_LIMITS_7,
+    PATH_PLAN_WAYPOINTS,
 )
 from core.kinematics_pin import PinKinematics, pin
-from core.ik_poly5_core import solve_ik_for_q_goal, poly5_trajectory
+from core.ik_poly5_core import solve_ik_for_q_goal, solve_ik_for_reset_pos, poly5_trajectory
 from sim.plot_joint_traces import plot_from_csv
 
 
@@ -233,9 +235,12 @@ def _append_dense_segment(
     return time_from_start
 
 
-def _build_reset_trajectory(start_q7: np.ndarray) -> Tuple[List[Tuple[np.ndarray, np.ndarray, np.ndarray, float]], np.ndarray]:
+def _build_reset_trajectory(
+    start_q7: np.ndarray,
+    reset_q7: np.ndarray,
+) -> Tuple[List[Tuple[np.ndarray, np.ndarray, np.ndarray, float]], np.ndarray]:
     q_min, q_max = _effective_q_limits()
-    q_init = np.clip(INIT_ARM.copy(), q_min, q_max)
+    q_init = np.clip(np.asarray(reset_q7, dtype=float).reshape(7), q_min, q_max)
     q_cmd7 = np.clip(np.asarray(start_q7, dtype=float).reshape(7), q_min, q_max)
     points: List[Tuple[np.ndarray, np.ndarray, np.ndarray, float]] = []
     time_from_start = 0.0
@@ -251,6 +256,8 @@ def _build_execution_trajectory(
     hold_sec: float,
     control_dt: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    # Densify execution segment waypoints to match reset/hold density.
+    dt_waypoint = control_dt / float(WAYPOINT_DENSITY)
     pin_model = PinKinematics()
     target_frame = "panda_link7"
     target_frame_id = pin_model.model.getFrameId(target_frame)
@@ -270,35 +277,83 @@ def _build_execution_trajectory(
     T0 = pin_model.data.oMf[target_frame_id]
     R_j7_des = np.array(T0.rotation, dtype=float)
 
-    q_goal = solve_ik_for_q_goal(
-        pin_model,
-        target_frame_id,
-        q_start,
-        p_j7_des,
-        R_j7_des,
-        Q_LIMITS_7,
-        QDOT_LIMITS_7,
-        QDDOT_LIMITS_7,
-        control_dt=control_dt,
-        max_iter=300,
-        kp_pos=2.0,
-        kp_rot=1.0,
-        v_j7_des=v_j7_des,
-    )
+    # Task-space path planning: straight-line waypoints from current to target.
+    T_start = pin_model.data.oMf[target_frame_id]
+    p_start = np.array(T_start.translation, dtype=float)
 
-    t, q, qdot, qddot, u = poly5_trajectory(
-        q_start,
-        q_goal,
-        Q_LIMITS_7,
-        QDOT_LIMITS_7,
-        QDDOT_LIMITS_7,
-        control_dt=control_dt,
-    )
+    n_wp = max(2, int(PATH_PLAN_WAYPOINTS))
+    waypoints = [
+        (1.0 - a) * p_start + a * p_j7_des
+        for a in np.linspace(0.0, 1.0, n_wp)
+    ]
+    v_start = np.zeros(3, dtype=float)
+    v_end = np.asarray(v_j7_des, dtype=float).reshape(3)
+    v_wp = [
+        (1.0 - a) * v_start + a * v_end
+        for a in np.linspace(0.0, 1.0, n_wp)
+    ]
+
+    t_list = []
+    q_list = []
+    qdot_list = []
+    qddot_list = []
+    u_list = []
+    t_offset = 0.0
+    q_seg_start = q_start.copy()
+    qdot_seg_start = np.zeros_like(q_start)
+
+    for i in range(n_wp - 1):
+        p_next = waypoints[i + 1]
+        v_next = v_wp[i + 1]
+        q_goal, qdot_goal = solve_ik_for_q_goal(
+            pin_model,
+            target_frame_id,
+            q_seg_start,
+            p_next,
+            R_j7_des,
+            Q_LIMITS_7,
+            QDOT_LIMITS_7,
+            QDDOT_LIMITS_7,
+            control_dt=control_dt,
+            max_iter=300,
+            kp_pos=2.0,
+            kp_rot=1.0,
+            v_j7_des=v_next,
+        )
+
+        t_seg, q_seg, qdot_seg, qddot_seg, u_seg = poly5_trajectory(
+            q_seg_start,
+            q_goal,
+            Q_LIMITS_7,
+            QDOT_LIMITS_7,
+            QDDOT_LIMITS_7,
+            control_dt=dt_waypoint,
+            qdot_start=qdot_seg_start,
+            qdot_goal=qdot_goal,
+        )
+
+        start_idx = 1 if i > 0 else 0
+        for k in range(start_idx, len(t_seg)):
+            t_list.append(float(t_seg[k] + t_offset))
+            q_list.append(q_seg[k].copy())
+            qdot_list.append(qdot_seg[k].copy())
+            qddot_list.append(qddot_seg[k].copy())
+            u_list.append(u_seg[k].copy())
+
+        t_offset = float(t_list[-1]) if t_list else t_offset
+        q_seg_start = q_goal.copy()
+        qdot_seg_start = qdot_goal.copy()
+
+    t = np.asarray(t_list, dtype=float)
+    q = np.asarray(q_list, dtype=float)
+    qdot = np.asarray(qdot_list, dtype=float)
+    qddot = np.asarray(qddot_list, dtype=float)
+    u = np.asarray(u_list, dtype=float)
 
     # append hold segment
     if hold_sec > 0:
-        n_hold = max(1, int(np.ceil(hold_sec / control_dt)))
-        t_hold = t[-1] + np.arange(1, n_hold + 1) * control_dt
+        n_hold = max(1, int(np.ceil(hold_sec / dt_waypoint)))
+        t_hold = t[-1] + np.arange(1, n_hold + 1) * dt_waypoint
         q_hold = np.repeat(q[-1][None, :], n_hold, axis=0)
         qdot_hold = np.zeros_like(q_hold)
         qddot_hold = np.zeros_like(q_hold)
@@ -362,12 +417,24 @@ def _read_current_joint_pos7() -> np.ndarray:
 
 def _resolve_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
         "--pose_joint7_vel",
         type=float,
         nargs=6,
-        required=True,
         help="Target joint7 pose and linear velocity: x y z vx vy vz (world)",
+    )
+    group.add_argument(
+        "--release_pos",
+        type=float,
+        nargs=3,
+        help="Release position in world: x y z (joint7)",
+    )
+    parser.add_argument(
+        "--target_pos",
+        type=float,
+        nargs=3,
+        help="Target landing position in world: x y z (ground z=0 if omitted)",
     )
     parser.add_argument("--action-server", default=DEFAULT_ACTION_SERVER)
     parser.add_argument("--start-delay", type=float, default=0.2)
@@ -400,9 +467,39 @@ def main():
         rospy.init_node("joint7_pose_sender", anonymous=True)
         start_q7 = _read_current_joint_pos7()
 
-    reset_points, q_reset = _build_reset_trajectory(start_q7=start_q7)
+    reset_q7 = INIT_ARM.copy()
+    if RESET_ARM_POS_WORLD is not None:
+        pin_model = PinKinematics()
+        reset_frame_id = pin_model.model.getFrameId("panda_link7")
+        if reset_frame_id == len(pin_model.model.frames):
+            raise RuntimeError("[pin] reset frame not found: panda_link7")
+        reset_q7, _ = solve_ik_for_reset_pos(
+            pin_model,
+            reset_q7,
+            RESET_ARM_POS_WORLD,
+            Q_LIMITS_7,
+            QDOT_LIMITS_7,
+            QDDOT_LIMITS_7,
+            control_dt=DT_CONTROL,
+            target_frame_id=reset_frame_id,
+        )
+    reset_points, q_reset = _build_reset_trajectory(start_q7=start_q7, reset_q7=reset_q7)
+
+    if args.release_pos is not None:
+        if args.target_pos is None:
+            raise RuntimeError("--target_pos required when using --release_pos")
+        from core.tube_baseline import solve_ballistic_velocity
+
+        p_j7_des = np.asarray(args.release_pos, dtype=float).reshape(3)
+        target_pos = np.asarray(args.target_pos, dtype=float).reshape(3)
+        v_j7_des, T_ball = solve_ballistic_velocity(p_j7_des, target_pos)
+        print(f"[ballistic] T={T_ball:.3f} v={v_j7_des.tolist()}", flush=True)
+        target_pose_vel = np.concatenate([p_j7_des, v_j7_des], axis=0)
+    else:
+        target_pose_vel = np.asarray(args.pose_joint7_vel, dtype=float)
+
     t_exec, q_exec, qdot_exec, qddot_exec, u_exec = _build_execution_trajectory(
-        target_pose_vel=np.asarray(args.pose_joint7_vel, dtype=float),
+        target_pose_vel=target_pose_vel,
         start_q7=q_reset,
         hold_sec=float(args.hold_sec),
         control_dt=DT_CONTROL,

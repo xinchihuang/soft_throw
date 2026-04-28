@@ -13,17 +13,23 @@ import numpy as np
 # ============================================================
 # USER CONFIG (paths)
 # ============================================================
-ROBOT_USD = "/home/xinchi/Desktop/lacosse_large_mobie_manipulator_new.usd"
-ROBOT_PRIM = "/World/LMM"
-FRANKA_ROOT = "/World/LMM/Franka"
+ROBOT_USD = os.environ.get("SOFT_THROW_ROBOT_USD", "/Isaac/Robots/Franka/franka.usd")
+ROBOT_PRIM = os.environ.get("SOFT_THROW_ROBOT_PRIM", "/World/LMM")
+FRANKA_ROOT = os.environ.get("SOFT_THROW_FRANKA_ROOT", "/World/LMM/Franka")
 
 BALL_PATH = "/World/LMM/Ball"
 LACROSSE_PATH = "/World/LMM/Franka/lacrosse"
 
 # Pinocchio URDF
-URDF = "/home/xinchi/isaac-sim/exts/isaacsim.asset.importer.urdf/data/urdf/robots/franka_description/robots/panda_arm_hand.urdf"
-PKG = "/home/xinchi/isaac-sim/exts/isaacsim.asset.importer.urdf/data/urdf/robots"
-EE_FRAME = "panda_link8"   # end-effector frame
+URDF = os.environ.get(
+    "SOFT_THROW_URDF",
+    "/home/xinchi/isaac-sim/exts/isaacsim.asset.importer.urdf/data/urdf/robots/franka_description/robots/panda_arm_hand.urdf",
+)
+PKG = os.environ.get(
+    "SOFT_THROW_PKG",
+    "/home/xinchi/isaac-sim/exts/isaacsim.asset.importer.urdf/data/urdf/robots",
+)
+EE_FRAME = "panda_hand"   # end-effector frame (gripper)
 
 
 # ============================================================
@@ -31,7 +37,7 @@ EE_FRAME = "panda_link8"   # end-effector frame
 # ============================================================
 CONTROL_HZ = 100.0
 DT_CONTROL = 1.0 / CONTROL_HZ
-WAYPOINT_DENSITY = 10
+WAYPOINT_DENSITY = 1
 
 # For speed: keep this low. If you set this high, raising CONTROL_HZ will slow wall-clock.
 SIM_UPDATES_PER_STEP = 1
@@ -62,11 +68,27 @@ QDOT_LIMITS_7 = np.array([2.1750, 2.1750, 2.1750, 2.1750, 2.6100, 2.6100, 2.6100
 # Joint acceleration limits for all 7 joints (rad/s^2) (from FCI)
 QDDOT_LIMITS_7 = np.array([15.0, 7.5, 10.0, 12.5, 15.0, 20.0, 20.0], dtype=float)
 
+# Joint jerk limits for all 7 joints (rad/s^3) (planner software limits).
+# These are conservative values commonly used for jerk-limited S-curve generation.
+QDDDOT_LIMITS_7 = np.array([750.0, 375.0, 500.0, 625.0, 750.0, 1000.0, 1000.0], dtype=float)
+
+# Planning safety scale for acceleration limits (<= 1.0).
+PLANNER_QDDOT_LIMIT_SCALE = 0.90
+
 # Optional action EMA smoothing (set higher => less sluggish)
 ACTION_EMA_ALPHA = 0.50
 
 # End-effector linear speed limit (m/s) (user constraint)
 EE_VEL_MAX = 2.0
+
+# ============================================================
+# CONSERVATIVE EE POSITION WORKSPACE (no collision)
+# ============================================================
+# Conservative reachability filter based only on EE world position p=[x,y,z]:
+#   ||p|| <= EE_WORKSPACE_R_MAX  AND  EE_WORKSPACE_Z_MIN <= z <= EE_WORKSPACE_Z_MAX
+EE_WORKSPACE_R_MAX = 1.10
+EE_WORKSPACE_Z_MIN = -0.33
+EE_WORKSPACE_Z_MAX = 1.19
 
 # ============================================================
 # TUBE BASELINE (robust release window) CONFIG
@@ -98,6 +120,11 @@ BALLISTIC_T_STEP = 0.01
 TUBE_T0 = 0.20           # end of ramp-up, start of robust-release window
 TUBE_HALF_WINDOW = 0.06  # +/- seconds => window length 2*half
 TUBE_DECEL_SEC = 0.25    # decelerate after tube window
+
+# Decel behavior: after the release window, joint6 can be commanded to rotate back
+# slightly to help ensure release/clearance. Other joints are allowed to move as
+# needed to decelerate under kinematic limits.
+TUBE_DECEL_J6_BACKOFF_RAD = 0.25
 
 # Tube velocity constraints (task-space)
 TUBE_CONE_DEG = 12.0     # allowed angular deviation from nominal release velocity
@@ -155,7 +182,10 @@ BALL_RESET_POS_WORLD = (-0.75, 0.0, 0.6)  # user requirement
 RESET_BALL_WAIT_SEC = 3.0    # after ball reset wait 2s then execute
 
 # Arm poses
-INIT_ARM = np.array([0.0, -1.57, 0.0, +1.57, 0.0, 3.14, 0.0], dtype=float)
+# INIT_ARM = np.array([0.0, -1.57, 0.0, +1.57, 0.0, 3.14, 0.0], dtype=float)
+
+INIT_ARM = np.array([-0.030482, 0.927178, 0.126971, -1.935261, 0.023713, 3.811172, -0.172520], dtype=float)
+
 # Optional arm reset position in world coordinates (x, y, z). If set, IK is used to
 # compute reset joint angles from this position using the current orientation.
 RESET_ARM_POS_WORLD = np.array([-0.1460463326, 0.0, 0.0313403997], dtype=float)

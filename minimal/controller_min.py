@@ -20,7 +20,7 @@ from core.throw_params import (
     Q_LIMITS_7,
     DT_CONTROL,
 )
-from core.kinematics_pin import PinKinematics
+from core.kinematic_forward import PinKinematics
 
 
 # Hard-coded (r, z, rdot, zdot) in throwing plane (user-specified baseline)

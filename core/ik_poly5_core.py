@@ -123,6 +123,12 @@ def poly5_trajectory(
     qddot_goal=None,
     t_search_max_iter=50,
     t_search_grow=1.2,
+    max_samples=None,
+    *,
+    check_max_samples: int | None = 2000,
+    progress: bool = False,
+    progress_prefix: str = "[poly5]",
+    snap_final_time_to_dt: bool = False,
 ):
     """Generate poly5 joint trajectory with position/velocity/accel boundary conditions.
 
@@ -179,11 +185,17 @@ def poly5_trajectory(
         a5 = a3_a4_a5[2]
         return a3, a4, a5
 
-    def _within_limits(T_val: float) -> bool:
+    def _within_limits(T_val: float):
         a3, a4, a5 = _solve_coeffs(T_val)
         n_steps = max(2, int(np.ceil(T_val / control_dt)) + 1)
-        for k in range(n_steps):
-            t = min(k * control_dt, T_val)
+        check_cap = None if check_max_samples is None else int(check_max_samples)
+        if check_cap is not None and n_steps > check_cap:
+            ts = np.linspace(0.0, T_val, check_cap)
+            ts_kind = "linspace_check"
+        else:
+            ts = [min(k * control_dt, T_val) for k in range(n_steps)]
+            ts_kind = "dt_check"
+        for t in ts:
             t2 = t * t
             t3 = t2 * t
             t4 = t3 * t
@@ -192,21 +204,42 @@ def poly5_trajectory(
             qd = a1 + 2.0 * a2 * t + 3.0 * a3 * t2 + 4.0 * a4 * t3 + 5.0 * a5 * t4
             qdd = 2.0 * a2 + 6.0 * a3 * t + 12.0 * a4 * t2 + 20.0 * a5 * t3
             if np.any(q < q_limits[:, 0]) or np.any(q > q_limits[:, 1]):
-                return False
+                return False, "q_limit", ts_kind, int(len(ts))
             if np.any(np.abs(qd) > qdot_limits):
-                return False
+                return False, "qdot_limit", ts_kind, int(len(ts))
             if np.any(np.abs(qdd) > qddot_limits):
-                return False
-        return True
+                return False, "qddot_limit", ts_kind, int(len(ts))
+        return True, "ok", ts_kind, int(len(ts))
 
     # Expand T until all limits are satisfied (numerical search).
-    for _ in range(int(t_search_max_iter)):
-        if _within_limits(T):
+    for search_iter in range(int(t_search_max_iter)):
+        ok, reason, ts_kind, ts_len = _within_limits(T)
+        if ok:
+            if progress:
+                print(f"{progress_prefix} search ok: iter={search_iter + 1} T={T:.6g}s samples={ts_len} ({ts_kind})")
             break
+        if progress:
+            print(
+                f"{progress_prefix} search: iter={search_iter + 1} T={T:.6g}s -> {reason} (samples={ts_len} {ts_kind}), grow={t_search_grow}"
+            )
         T *= float(t_search_grow)
+    else:
+        if progress:
+            print(f"{progress_prefix} search failed: max_iter={t_search_max_iter} final_T={T:.6g}s (continuing)")
 
-    n_steps = max(2, int(np.ceil(T / control_dt)) + 1)
+    if snap_final_time_to_dt:
+        if control_dt <= 0.0:
+            raise ValueError("control_dt must be > 0 when snap_final_time_to_dt=True")
+        T = float(np.ceil(T / control_dt) * control_dt)
+        n_steps = max(2, int(np.round(T / control_dt)) + 1)
+    else:
+        n_steps = max(2, int(np.ceil(T / control_dt)) + 1)
     a3, a4, a5 = _solve_coeffs(T)
+    if progress:
+        print(
+            f"{progress_prefix} finalize: T={T:.6g}s n_steps={n_steps} dt={control_dt:g}s "
+            f"max_samples={max_samples} check_max_samples={check_max_samples}"
+        )
 
     t_hist = []
     q_hist = []
@@ -214,8 +247,15 @@ def poly5_trajectory(
     qddot_hist = []
     u_hist = []
 
-    for k in range(n_steps):
-        t = min(k * control_dt, T)
+    if max_samples is not None and n_steps > int(max_samples):
+        ts = np.linspace(0.0, T, int(max_samples))
+    else:
+        if snap_final_time_to_dt:
+            # Constant dt with final time snapped to a multiple of dt.
+            ts = np.linspace(0.0, T, n_steps)
+        else:
+            ts = [min(k * control_dt, T) for k in range(n_steps)]
+    for t in ts:
         t2 = t * t
         t3 = t2 * t
         t4 = t3 * t
@@ -223,10 +263,6 @@ def poly5_trajectory(
         q = a0 + a1 * t + a2 * t2 + a3 * t3 + a4 * t4 + a5 * t5
         qd = a1 + 2.0 * a2 * t + 3.0 * a3 * t2 + 4.0 * a4 * t3 + 5.0 * a5 * t4
         qdd = 2.0 * a2 + 6.0 * a3 * t + 12.0 * a4 * t2 + 20.0 * a5 * t3
-        q = np.clip(q, q_limits[:, 0], q_limits[:, 1])
-        qd = np.clip(qd, -qdot_limits, qdot_limits)
-        qdd = np.clip(qdd, -qddot_limits, qddot_limits)
-
         t_hist.append(t)
         q_hist.append(q.copy())
         qdot_hist.append(qd.copy())

@@ -1,0 +1,23 @@
+{
+  "n": 50000,
+  "xyz_min": [
+    -0.8533933380417357,
+    -0.8539351849310286,
+    -0.3323963731088242
+  ],
+  "xyz_max": [
+    0.8524284136687584,
+    0.8528083744739782,
+    1.1870433856230393
+  ],
+  "r_min": 0.012750632948903511,
+  "r_max": 1.189069777012828,
+  "r_mean": 0.7685404758545488,
+  "r_p05": 0.3018319739870416,
+  "r_p95": 1.1215980380969823,
+  "ee_frame": "panda_link8",
+  "urdf": "/home/yifan/.local/share/ov/data/exts/v2/isaacsim.asset.importer.urdf-2.4.31+107.3.3.lx64.r.cp311/data/urdf/robots/franka_description/robots/panda_arm_hand.urdf",
+  "pkg": "/home/yifan/.local/share/ov/data/exts/v2/isaacsim.asset.importer.urdf-2.4.31+107.3.3.lx64.r.cp311/data/urdf/robots",
+  "limit_scale": 1.0,
+  "seed": 0
+}

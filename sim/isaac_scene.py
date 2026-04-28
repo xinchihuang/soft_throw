@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 
 import math
+import os
+from pathlib import Path
 
 import omni.usd
 import omni.timeline
@@ -117,8 +119,19 @@ def spawn_ground(stage):
 
 
 def add_robot_reference(stage, prim_path: str = ROBOT_PRIM, usd_path: str = ROBOT_USD):
-    if usd_path.startswith("/"):
-        usd_path = "file://" + usd_path
+    # Accept:
+    # - filesystem paths (absolute or relative) -> convert to file:// when the file exists
+    # - Nucleus / mounted assets paths like "/Isaac/Robots/..." -> keep as-is
+    # - already-qualified URLs like "omniverse://", "file://", "http(s)://"
+    if "://" not in usd_path:
+        p = Path(usd_path)
+        if p.is_absolute() or p.exists():
+            try:
+                p_abs = p.resolve() if not p.is_absolute() else p
+            except Exception:
+                p_abs = p
+            if os.path.isfile(p_abs):
+                usd_path = "file://" + str(p_abs)
     if not valid(stage, prim_path):
         stage.DefinePrim(prim_path, "Xform")
     stage.GetPrimAtPath(prim_path).GetReferences().AddReference(usd_path)

@@ -10,7 +10,6 @@ the joint7 frame directly instead of a lacrosse attachment.
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Tuple
 
 import numpy as np
 
@@ -31,8 +30,15 @@ from core.throw_params import (
     Q_LIMITS_7,
     PATH_PLAN_WAYPOINTS,
 )
-from core.kinematics_pin import PinKinematics, pin
-from core.ik_poly5_core import solve_ik_for_q_goal, solve_ik_for_reset_pos, poly5_trajectory
+from core.kinematic_forward import PinKinematics
+from core.trajectory_planner import (
+    build_execution_trajectory,
+    build_reset_trajectory,
+    compute_reset_q7,
+    solve_release_velocity,
+    write_trace_csv,
+    write_trace_with_tau_csv,
+)
 from sim.plot_joint_traces import plot_from_csv
 
 
@@ -48,323 +54,15 @@ JOINT_NAMES = [
 
 DEFAULT_ACTION_SERVER = "/position_joint_trajectory_controller/follow_joint_trajectory"
 LIMIT_SCALE = 0.1
-EE_SPEED_LIMIT = 0.2
 JOINT_LIMIT_MARGIN = 0.2
 SMOOTHING_WINDOW = 9
-
-
-def _effective_q_limits() -> Tuple[np.ndarray, np.ndarray]:
-    q_min = Q_LIMITS_7[:, 0] + JOINT_LIMIT_MARGIN
-    q_max = Q_LIMITS_7[:, 1] - JOINT_LIMIT_MARGIN
-    return q_min, q_max
 
 
 def _save_csv_and_plot(t, q, qdot, qddot, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "joint_traces.csv"
-    header = ["t"] + [f"q{j}" for j in range(7)] + [f"dq{j}" for j in range(7)] + [f"ddq{j}" for j in range(7)]
-    data = np.column_stack([t, q, qdot, qddot])
-    np.savetxt(csv_path, data, delimiter=",", header=",".join(header), comments="")
+    write_trace_with_tau_csv(str(csv_path), t, q, qdot, qddot)
     plot_from_csv(str(csv_path), str(output_dir))
-
-
-def _points_to_arrays(points):
-    t = np.asarray([pt[3] for pt in points], dtype=float)
-    q = np.asarray([pt[0] for pt in points], dtype=float)
-    qdot = np.asarray([pt[1] for pt in points], dtype=float)
-    qddot = np.asarray([pt[2] for pt in points], dtype=float)
-    return t, q, qdot, qddot
-
-
-def _append_point(points, positions, velocities, time_from_start: float) -> None:
-    points.append(
-        (
-            np.asarray(positions, dtype=float).copy(),
-            np.asarray(velocities, dtype=float).copy(),
-            np.zeros(7, dtype=float),
-            float(time_from_start),
-        )
-    )
-
-
-def _append_hold(points, positions, duration_sec: float, time_from_start: float) -> float:
-    dt_waypoint = DT_CONTROL / float(WAYPOINT_DENSITY)
-    n_steps = max(1, int(np.ceil(float(duration_sec) / dt_waypoint)))
-    for _ in range(n_steps):
-        time_from_start += dt_waypoint
-        _append_point(points, positions, np.zeros(7, dtype=float), time_from_start)
-    return time_from_start
-
-
-def _postprocess_trajectory(points):
-    if not points:
-        return points
-
-    q = np.asarray([pt[0] for pt in points], dtype=float)
-    t = np.asarray([pt[3] for pt in points], dtype=float)
-    n = len(points)
-
-    if n >= SMOOTHING_WINDOW:
-        pad = SMOOTHING_WINDOW // 2
-        kernel = np.ones(SMOOTHING_WINDOW, dtype=float) / float(SMOOTHING_WINDOW)
-        q_smooth = q.copy()
-        for j in range(q.shape[1]):
-            series = np.pad(q[:, j], (pad, pad), mode="edge")
-            q_smooth[:, j] = np.convolve(series, kernel, mode="valid")
-        q = q_smooth
-        q_min, q_max = _effective_q_limits()
-        q = np.clip(q, q_min, q_max)
-
-    qdot = np.zeros_like(q)
-    if n >= 2:
-        dt_f = np.diff(t)
-        dq_f = np.diff(q, axis=0)
-        valid_f = dt_f > 1e-9
-        qdot[:-1][valid_f] = dq_f[valid_f] / dt_f[valid_f, None]
-        qdot[-1] = np.zeros(7, dtype=float)
-
-    qddot = np.zeros_like(q)
-    if n >= 2:
-        dt_v = np.diff(t)
-        dqdot = np.diff(qdot, axis=0)
-        valid_v = dt_v > 1e-9
-        qddot[:-1][valid_v] = dqdot[valid_v] / dt_v[valid_v, None]
-        qddot[-1] = np.zeros(7, dtype=float)
-
-    out = []
-    for i in range(n):
-        out.append((q[i].copy(), qdot[i].copy(), qddot[i].copy(), float(t[i])))
-    return out
-
-
-def _append_interp(points, q_from: np.ndarray, q_to: np.ndarray, time_from_start: float) -> Tuple[np.ndarray, float]:
-    q_from = np.asarray(q_from, dtype=float).copy()
-    q_to = np.asarray(q_to, dtype=float).copy()
-
-    qdot_limits = LIMIT_SCALE * QDOT_LIMITS_7
-    dt_waypoint = DT_CONTROL / float(WAYPOINT_DENSITY)
-    dq = np.abs(q_to - q_from)
-    step_counts = np.ceil(dq / np.maximum(1e-9, qdot_limits * dt_waypoint)).astype(int)
-    n_steps = max(1, int(np.max(step_counts)))
-
-    for k in range(n_steps):
-        u = float(k + 1) / float(n_steps)
-        alpha = u * u * (3.0 - 2.0 * u)
-        q = (1.0 - alpha) * q_from + alpha * q_to
-        q_prev = q_from if k == 0 else points[-1][0]
-        qdot = (q - q_prev) / dt_waypoint
-        time_from_start += dt_waypoint
-        _append_point(points, q, qdot, time_from_start)
-
-    return q_to.copy(), time_from_start
-
-
-def _safe_step_velocity(q_cmd7: np.ndarray, qdot_des: np.ndarray, qdot_prev: np.ndarray) -> np.ndarray:
-    """Apply acceleration, velocity, and one-step position limits."""
-    qdot_limits = LIMIT_SCALE * QDOT_LIMITS_7
-    qddot_limits = LIMIT_SCALE * QDDOT_LIMITS_7
-    q_min, q_max = _effective_q_limits()
-
-    max_dq = qddot_limits * DT_CONTROL
-    dq = np.clip(qdot_des - qdot_prev, -max_dq, max_dq)
-    qdot7 = qdot_prev + dq
-    qdot7 = np.clip(qdot7, -qdot_limits, qdot_limits)
-
-    qdot_min_from_pos = (q_min - q_cmd7) / DT_CONTROL
-    qdot_max_from_pos = (q_max - q_cmd7) / DT_CONTROL
-    qdot7 = np.clip(qdot7, qdot_min_from_pos, qdot_max_from_pos)
-    return qdot7
-
-
-def _build_jacobian_arm7(pin_model: PinKinematics, q_cmd7: np.ndarray, frame_id: int) -> np.ndarray:
-    q_full = pin_model.make_q_full_from_arm7(q_cmd7)
-    pin.forwardKinematics(pin_model.model, pin_model.data, q_full)
-    pin.updateFramePlacements(pin_model.model, pin_model.data)
-    J = pin.computeFrameJacobian(
-        pin_model.model, pin_model.data, q_full, frame_id, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
-    )
-    J_arm = np.zeros((6, 7), dtype=float)
-    for j in range(1, 8):
-        jid = pin_model.model.getJointId(f"panda_joint{j}")
-        idx_v = int(pin_model.model.joints[jid].idx_v)
-        J_arm[:, j - 1] = J[:, idx_v]
-    return J_arm
-
-
-def _clip_cartesian_speed(pin_model: PinKinematics, q_cmd7: np.ndarray, qdot7: np.ndarray) -> np.ndarray:
-    ee_speed = pin_model.ee_speed_from_qdot7(q_cmd7, qdot7)
-    if ee_speed <= EE_SPEED_LIMIT or ee_speed <= 1e-9:
-        return qdot7
-    return qdot7 * (EE_SPEED_LIMIT / ee_speed)
-
-
-def _append_dense_segment(
-    points,
-    q_start: np.ndarray,
-    q_end: np.ndarray,
-    qdot_start: np.ndarray,
-    qdot_end: np.ndarray,
-    time_from_start: float,
-) -> float:
-    q_start = np.asarray(q_start, dtype=float)
-    q_end = np.asarray(q_end, dtype=float)
-    qdot_start = np.asarray(qdot_start, dtype=float)
-    qdot_end = np.asarray(qdot_end, dtype=float)
-
-    seg_dt = DT_CONTROL
-    dt_waypoint = seg_dt / float(WAYPOINT_DENSITY)
-    for sub in range(WAYPOINT_DENSITY):
-        s = float(sub + 1) / float(WAYPOINT_DENSITY)
-        h00 = 2.0 * s**3 - 3.0 * s**2 + 1.0
-        h10 = s**3 - 2.0 * s**2 + s
-        h01 = -2.0 * s**3 + 3.0 * s**2
-        h11 = s**3 - s**2
-        dh00 = 6.0 * s**2 - 6.0 * s
-        dh10 = 3.0 * s**2 - 4.0 * s + 1.0
-        dh01 = -6.0 * s**2 + 6.0 * s
-        dh11 = 3.0 * s**2 - 2.0 * s
-        q = h00 * q_start + h10 * seg_dt * qdot_start + h01 * q_end + h11 * seg_dt * qdot_end
-        qdot = (
-            dh00 * q_start / seg_dt
-            + dh10 * qdot_start
-            + dh01 * q_end / seg_dt
-            + dh11 * qdot_end
-        )
-        time_from_start += dt_waypoint
-        _append_point(points, q, qdot, time_from_start)
-    return time_from_start
-
-
-def _build_reset_trajectory(
-    start_q7: np.ndarray,
-    reset_q7: np.ndarray,
-) -> Tuple[List[Tuple[np.ndarray, np.ndarray, np.ndarray, float]], np.ndarray]:
-    q_min, q_max = _effective_q_limits()
-    q_init = np.clip(np.asarray(reset_q7, dtype=float).reshape(7), q_min, q_max)
-    q_cmd7 = np.clip(np.asarray(start_q7, dtype=float).reshape(7), q_min, q_max)
-    points: List[Tuple[np.ndarray, np.ndarray, np.ndarray, float]] = []
-    time_from_start = 0.0
-    q_cmd7, time_from_start = _append_interp(points, q_cmd7, q_init, time_from_start)
-    time_from_start = _append_hold(points, q_cmd7, RESET_ARM_SETTLE_SEC, time_from_start)
-    time_from_start = _append_hold(points, q_cmd7, RESET_BALL_WAIT_SEC, time_from_start)
-    return _postprocess_trajectory(points), q_cmd7
-
-
-def _build_execution_trajectory(
-    target_pose_vel: np.ndarray,
-    start_q7: np.ndarray,
-    hold_sec: float,
-    control_dt: float,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    # Densify execution segment waypoints to match reset/hold density.
-    dt_waypoint = control_dt / float(WAYPOINT_DENSITY)
-    pin_model = PinKinematics()
-    target_frame = "panda_link7"
-    target_frame_id = pin_model.model.getFrameId(target_frame)
-    if target_frame_id == len(pin_model.model.frames):
-        raise RuntimeError(f"[pin] target frame not found: {target_frame}")
-
-    pose = np.asarray(target_pose_vel, dtype=float).reshape(6)
-    p_j7_des = pose[:3]
-    v_j7_des = pose[3:]
-
-    q_min, q_max = _effective_q_limits()
-    q_start = np.clip(np.asarray(start_q7, dtype=float).reshape(7), q_min, q_max)
-
-    q_full = pin_model.make_q_full_from_arm7(q_start)
-    pin.forwardKinematics(pin_model.model, pin_model.data, q_full)
-    pin.updateFramePlacements(pin_model.model, pin_model.data)
-    T0 = pin_model.data.oMf[target_frame_id]
-    R_j7_des = np.array(T0.rotation, dtype=float)
-
-    # Task-space path planning: straight-line waypoints from current to target.
-    T_start = pin_model.data.oMf[target_frame_id]
-    p_start = np.array(T_start.translation, dtype=float)
-
-    n_wp = max(2, int(PATH_PLAN_WAYPOINTS))
-    waypoints = [
-        (1.0 - a) * p_start + a * p_j7_des
-        for a in np.linspace(0.0, 1.0, n_wp)
-    ]
-    v_start = np.zeros(3, dtype=float)
-    v_end = np.asarray(v_j7_des, dtype=float).reshape(3)
-    v_wp = [
-        (1.0 - a) * v_start + a * v_end
-        for a in np.linspace(0.0, 1.0, n_wp)
-    ]
-
-    t_list = []
-    q_list = []
-    qdot_list = []
-    qddot_list = []
-    u_list = []
-    t_offset = 0.0
-    q_seg_start = q_start.copy()
-    qdot_seg_start = np.zeros_like(q_start)
-
-    for i in range(n_wp - 1):
-        p_next = waypoints[i + 1]
-        v_next = v_wp[i + 1]
-        q_goal, qdot_goal = solve_ik_for_q_goal(
-            pin_model,
-            target_frame_id,
-            q_seg_start,
-            p_next,
-            R_j7_des,
-            Q_LIMITS_7,
-            QDOT_LIMITS_7,
-            QDDOT_LIMITS_7,
-            control_dt=control_dt,
-            max_iter=300,
-            kp_pos=2.0,
-            kp_rot=1.0,
-            v_j7_des=v_next,
-        )
-
-        t_seg, q_seg, qdot_seg, qddot_seg, u_seg = poly5_trajectory(
-            q_seg_start,
-            q_goal,
-            Q_LIMITS_7,
-            QDOT_LIMITS_7,
-            QDDOT_LIMITS_7,
-            control_dt=dt_waypoint,
-            qdot_start=qdot_seg_start,
-            qdot_goal=qdot_goal,
-        )
-
-        start_idx = 1 if i > 0 else 0
-        for k in range(start_idx, len(t_seg)):
-            t_list.append(float(t_seg[k] + t_offset))
-            q_list.append(q_seg[k].copy())
-            qdot_list.append(qdot_seg[k].copy())
-            qddot_list.append(qddot_seg[k].copy())
-            u_list.append(u_seg[k].copy())
-
-        t_offset = float(t_list[-1]) if t_list else t_offset
-        q_seg_start = q_goal.copy()
-        qdot_seg_start = qdot_goal.copy()
-
-    t = np.asarray(t_list, dtype=float)
-    q = np.asarray(q_list, dtype=float)
-    qdot = np.asarray(qdot_list, dtype=float)
-    qddot = np.asarray(qddot_list, dtype=float)
-    u = np.asarray(u_list, dtype=float)
-
-    # append hold segment
-    if hold_sec > 0:
-        n_hold = max(1, int(np.ceil(hold_sec / dt_waypoint)))
-        t_hold = t[-1] + np.arange(1, n_hold + 1) * dt_waypoint
-        q_hold = np.repeat(q[-1][None, :], n_hold, axis=0)
-        qdot_hold = np.zeros_like(q_hold)
-        qddot_hold = np.zeros_like(q_hold)
-        u_hold = np.zeros_like(q_hold)
-        t = np.concatenate([t, t_hold])
-        q = np.concatenate([q, q_hold])
-        qdot = np.concatenate([qdot, qdot_hold])
-        qddot = np.concatenate([qddot, qddot_hold])
-        u = np.concatenate([u, u_hold])
-
-    return t, q, qdot, qddot, u
 
 
 def _send_ros_trajectory(points, action_server: str, start_delay: float):
@@ -467,13 +165,10 @@ def main():
         rospy.init_node("joint7_pose_sender", anonymous=True)
         start_q7 = _read_current_joint_pos7()
 
+    pin_model = PinKinematics()
     reset_q7 = INIT_ARM.copy()
     if RESET_ARM_POS_WORLD is not None:
-        pin_model = PinKinematics()
-        reset_frame_id = pin_model.model.getFrameId("panda_link7")
-        if reset_frame_id == len(pin_model.model.frames):
-            raise RuntimeError("[pin] reset frame not found: panda_link7")
-        reset_q7, _ = solve_ik_for_reset_pos(
+        reset_q7 = compute_reset_q7(
             pin_model,
             reset_q7,
             RESET_ARM_POS_WORLD,
@@ -481,29 +176,58 @@ def main():
             QDOT_LIMITS_7,
             QDDOT_LIMITS_7,
             control_dt=DT_CONTROL,
-            target_frame_id=reset_frame_id,
+            target_frame="panda_link7",
         )
-    reset_points, q_reset = _build_reset_trajectory(start_q7=start_q7, reset_q7=reset_q7)
+    reset_points, q_reset, _split_idx = build_reset_trajectory(
+        start_q7=start_q7,
+        reset_q7=reset_q7,
+        control_dt=DT_CONTROL,
+        waypoint_density=WAYPOINT_DENSITY,
+        settle_sec=RESET_ARM_SETTLE_SEC,
+        extra_hold_sec=RESET_BALL_WAIT_SEC,
+        q_limits=Q_LIMITS_7,
+        qdot_limits=QDOT_LIMITS_7,
+        limit_scale=LIMIT_SCALE,
+        joint_limit_margin=JOINT_LIMIT_MARGIN,
+        smoothing_window=SMOOTHING_WINDOW,
+    )
 
     if args.release_pos is not None:
         if args.target_pos is None:
             raise RuntimeError("--target_pos required when using --release_pos")
-        from core.tube_baseline import solve_ballistic_velocity
-
         p_j7_des = np.asarray(args.release_pos, dtype=float).reshape(3)
         target_pos = np.asarray(args.target_pos, dtype=float).reshape(3)
-        v_j7_des, T_ball = solve_ballistic_velocity(p_j7_des, target_pos)
+        v_j7_des, T_ball = solve_release_velocity(p_j7_des, target_pos)
         print(f"[ballistic] T={T_ball:.3f} v={v_j7_des.tolist()}", flush=True)
         target_pose_vel = np.concatenate([p_j7_des, v_j7_des], axis=0)
     else:
         target_pose_vel = np.asarray(args.pose_joint7_vel, dtype=float)
 
-    t_exec, q_exec, qdot_exec, qddot_exec, u_exec = _build_execution_trajectory(
+    t_exec, q_exec, qdot_exec, qddot_exec, _u_exec = build_execution_trajectory(
         target_pose_vel=target_pose_vel,
         start_q7=q_reset,
-        hold_sec=float(args.hold_sec),
+        q_limits=Q_LIMITS_7,
+        qdot_limits=QDOT_LIMITS_7,
+        qddot_limits=QDDOT_LIMITS_7,
         control_dt=DT_CONTROL,
+        waypoint_density=WAYPOINT_DENSITY,
+        path_plan_waypoints=PATH_PLAN_WAYPOINTS,
+        target_frame="panda_link7",
+        pin_model=pin_model,
+        qdot_start=np.zeros(7, dtype=float),
+        joint_limit_margin=JOINT_LIMIT_MARGIN,
     )
+    if float(args.hold_sec) > 0.0:
+        dt_waypoint = DT_CONTROL / float(WAYPOINT_DENSITY)
+        n_hold = max(1, int(np.ceil(float(args.hold_sec) / dt_waypoint)))
+        t_hold = t_exec[-1] + np.arange(1, n_hold + 1) * dt_waypoint
+        q_hold = np.repeat(q_exec[-1][None, :], n_hold, axis=0)
+        qdot_hold = np.zeros_like(q_hold)
+        qddot_hold = np.zeros_like(q_hold)
+        t_exec = np.concatenate([t_exec, t_hold])
+        q_exec = np.concatenate([q_exec, q_hold])
+        qdot_exec = np.concatenate([qdot_exec, qdot_hold])
+        qddot_exec = np.concatenate([qddot_exec, qddot_hold])
     # Build points list for ROS
     points = reset_points.copy()
     t_offset = float(reset_points[-1][3]) if reset_points else 0.0
@@ -515,6 +239,8 @@ def main():
     _save_csv_and_plot(t_exec, q_exec, qdot_exec, qddot_exec, Path(args.plot_dir))
 
     if args.print_only:
+        tau_path = Path(args.plot_dir) / "trajectory.csv"
+        write_trace_with_tau_csv(str(tau_path), t_exec, q_exec, qdot_exec, qddot_exec)
         return
 
     exec_points = [(q_exec[i], qdot_exec[i], qddot_exec[i], float(t_exec[i])) for i in range(len(t_exec))]

@@ -70,7 +70,8 @@ QDDOT_LIMITS_7 = np.array([15.0, 7.5, 10.0, 12.5, 15.0, 20.0, 20.0], dtype=float
 
 # Joint jerk limits for all 7 joints (rad/s^3) (planner software limits).
 # These are conservative values commonly used for jerk-limited S-curve generation.
-QDDDOT_LIMITS_7 = np.array([750.0, 375.0, 500.0, 625.0, 750.0, 1000.0, 1000.0], dtype=float)
+JERK_SCALE = 0.5
+QDDDOT_LIMITS_7 = np.array([JERK_SCALE * 750.0, JERK_SCALE * 375.0, JERK_SCALE * 500.0, JERK_SCALE * 625.0, JERK_SCALE * 750.0, JERK_SCALE * 1000.0, JERK_SCALE * 1000.0], dtype=float)
 
 # Planning safety scale for acceleration limits (<= 1.0).
 PLANNER_QDDOT_LIMIT_SCALE = 0.90
@@ -121,10 +122,68 @@ TUBE_T0 = 0.20           # end of ramp-up, start of robust-release window
 TUBE_HALF_WINDOW = 0.06  # +/- seconds => window length 2*half
 TUBE_DECEL_SEC = 0.25    # decelerate after tube window
 
+# Planning safety scale for joint acceleration limits during the *decel* segment (<= 1.0).
+# Used by offline planners such as `tube_throw.py`.
+TUBE_DECEL_QDDOT_LIMIT_SCALE = 1
+
 # Decel behavior: after the release window, joint6 can be commanded to rotate back
 # slightly to help ensure release/clearance. Other joints are allowed to move as
 # needed to decelerate under kinematic limits.
-TUBE_DECEL_J6_BACKOFF_RAD = 0.25
+TUBE_DECEL_J6_BACKOFF_RAD = 0.5
+
+
+# ============================================================
+# OFFLINE PLANNER / EXPORT (tube_throw.py)
+# ============================================================
+# NOTE: `tube_throw.py` should not expose CLI tuning flags; store all knobs here.
+
+# Window generation
+TUBE_THROW_METHOD = "middle"  # {"middle","paper_like"}
+TUBE_THROW_HOLD_SEC = 0.50
+TUBE_THROW_N_WINDOW_SAMPLES = 3
+TUBE_THROW_WINDOW_SEGMENTS = 1  # 1 uses only start/end release waypoints
+TUBE_THROW_NOMINAL_FLIGHT_TIME = 0.65
+
+# Trajectory discretization
+TUBE_THROW_CONTROL_DT = 0.01
+TUBE_THROW_WAYPOINT_DENSITY = 10
+TUBE_THROW_PATH_PLAN_WAYPOINTS = 2
+
+# Safety/limits (scales are <= 1.0)
+TUBE_THROW_LIMIT_SCALE = 0.70
+TUBE_THROW_QDDOT_SCALE = 0.60
+
+# Planner behavior
+TUBE_THROW_MAX_PRE_DURATION_SEC = 5.0
+TUBE_THROW_MAX_DURATION_SEC = 8.0
+TUBE_THROW_TIME_SCALE = 1.0  # S>1 slows exported trajectory (qdot=1/S, qddot=1/S^2)
+TUBE_THROW_IK_MAX_ITER = 50
+TUBE_THROW_POLY5_MAX_SAMPLES = 0  # 0 disables capping
+TUBE_THROW_SEGMENT_METHOD = "scurve"  # {"poly5","scurve"}
+TUBE_THROW_VERBOSE = False
+TUBE_THROW_PROGRESS = False
+TUBE_THROW_AUTO_START = False
+TUBE_THROW_PRECHECK = True
+TUBE_THROW_WITH_WINDOW = False  # default safe for execution (pre + decel only)
+
+# CSV / plotting / exports
+TUBE_THROW_SAVE_CSV = "trajectory.csv"
+TUBE_THROW_CSV_TAU = "omit"  # {"omit","zero","jerk"}
+TUBE_THROW_EXPORT_EE = True
+TUBE_THROW_EE_OUT = "ee_states.csv"
+TUBE_THROW_EE_FRAME = "panda_hand"
+TUBE_THROW_PLOT = True
+TUBE_THROW_PLOT_OUT_DIR = "joint_plots"
+TUBE_THROW_PLOT_TUBE = True
+TUBE_THROW_PLOT_TUBE_HTML = "tube_window.html"
+TUBE_THROW_PLOT_TUBE_IMAGE = None  # optional path (png/svg); requires plotly image backend
+TUBE_THROW_OPEN_HTML = True
+TUBE_THROW_PLOT_TUBE_ONLY = False
+
+# Comparison/baseline export
+TUBE_THROW_COMPARE_NO_TUBE = False
+TUBE_THROW_COMPARE_CSV = "trajectory_no_tube.csv"
+TUBE_THROW_BASELINE_DECEL_MIN_SEC = 0.5
 
 # Tube velocity constraints (task-space)
 TUBE_CONE_DEG = 12.0     # allowed angular deviation from nominal release velocity
@@ -184,7 +243,8 @@ RESET_BALL_WAIT_SEC = 3.0    # after ball reset wait 2s then execute
 # Arm poses
 # INIT_ARM = np.array([0.0, -1.57, 0.0, +1.57, 0.0, 3.14, 0.0], dtype=float)
 
-INIT_ARM = np.array([-0.030482, 0.927178, 0.126971, -1.935261, 0.023713, 3.811172, -0.172520], dtype=float)
+INIT_ARM = np.array([0.0, -1.3, -0.0, -2.810795, -0.0, 2.090494, 0.0
+                     ], dtype=float)
 
 # Optional arm reset position in world coordinates (x, y, z). If set, IK is used to
 # compute reset joint angles from this position using the current orientation.

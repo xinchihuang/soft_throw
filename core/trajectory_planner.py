@@ -731,7 +731,16 @@ def write_trace_csv(csv_path: str, t, q, qdot, qddot, *, time_unit: str = "s") -
     np.savetxt(csv_path, data, delimiter=",", header=",".join(header), comments="")
 
 
-def write_trace_with_tau_csv(csv_path: str, t, q, qdot, qddot, *, time_unit: str = "s") -> None:
+def write_trace_with_tau_csv(
+    csv_path: str,
+    t,
+    q,
+    qdot,
+    qddot,
+    *,
+    time_unit: str = "s",
+    tau_mode: str = "zero",
+) -> None:
     t = np.asarray(t, dtype=float).reshape(-1)
     q = np.asarray(q, dtype=float)
     qdot = np.asarray(qdot, dtype=float)
@@ -744,10 +753,18 @@ def write_trace_with_tau_csv(csv_path: str, t, q, qdot, qddot, *, time_unit: str
     else:
         raise ValueError(f"Unsupported time_unit: {time_unit!r} (expected 's' or 'ms')")
 
-    if t.size < 2:
+    tau_mode = str(tau_mode)
+    if tau_mode == "zero":
         tau = np.zeros_like(qddot)
+    elif tau_mode == "jerk":
+        # NOTE: This is jerk (d/dt qddot), useful for offline plots only.
+        # Many torque-control executors interpret `tau*` as commanded joint torques (Nm).
+        if t.size < 2:
+            tau = np.zeros_like(qddot)
+        else:
+            tau = np.gradient(qddot, t, axis=0)
     else:
-        tau = np.gradient(qddot, t, axis=0)
+        raise ValueError(f"Unknown tau_mode: {tau_mode!r} (expected 'zero' or 'jerk')")
     header = (
         ["t"]
         + [f"q{j}" for j in range(7)]

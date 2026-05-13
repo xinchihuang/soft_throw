@@ -1,21 +1,16 @@
 {
   "phases": [
     {
-      "name": "pre",
-      "t_end": 0.521543670007028,
+      "name": "accel",
+      "t_end": 1.9172813399208617,
       "t_start": 0.0
     },
     {
-      "name": "window",
-      "t_end": 0.962660020112466,
-      "t_start": 0.521543670007028
-    },
-    {
       "name": "decel",
-      "t_end": 1.155868355396562,
-      "t_start": 0.962660020112466
+      "t_end": 2.038019779694762,
+      "t_start": 1.9172813399208617
     }
   ],
   "time_unit": "s",
-  "with_window": true
+  "with_window": false
 }

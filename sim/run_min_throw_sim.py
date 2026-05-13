@@ -155,9 +155,16 @@ def main():
         return
 
     from isaaclab.app import AppLauncher
+    from sim.plot_joint_traces import plot_from_csv
+
+    app_launcher = AppLauncher(headless=bool(args.headless))
+    simulation_app = app_launcher.app
+
+    import omni.timeline
     from sim.isaac_scene import (
         get_stage,
         ensure_physics_scene,
+        repair_lmm_asset_references,
         spawn_ground,
         spawn_lights,
         add_robot_reference,
@@ -168,11 +175,6 @@ def main():
         apply_arm_targets,
         reset_ball,
     )
-    from sim.plot_joint_traces import plot_from_csv
-    import omni.timeline
-
-    app_launcher = AppLauncher(headless=bool(args.headless))
-    simulation_app = app_launcher.app
 
     def _read_joint_targets(stage, joint_paths):
         from pxr import UsdPhysics
@@ -190,6 +192,7 @@ def main():
     spawn_ground(stage)
     spawn_lights(stage)
     add_robot_reference(stage, ROBOT_PRIM, ROBOT_USD)
+    repair_lmm_asset_references(stage, ROBOT_PRIM)
 
     timeline = omni.timeline.get_timeline_interface()
     timeline.play()

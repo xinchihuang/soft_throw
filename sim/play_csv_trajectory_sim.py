@@ -20,8 +20,11 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import select
 import sys
+import termios
 import time
+import tty
 from pathlib import Path
 
 import numpy as np
@@ -122,7 +125,44 @@ def main() -> int:
         action="store_true",
         help="Do not wait for Enter; start playback immediately after reset/settle.",
     )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=0,
+        help="Number of playback passes. Default 0 means repeat forever until q.",
+    )
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        help="Repeat playback forever. Equivalent to --repeat 0.",
+    )
+    parser.add_argument(
+        "--repeat-reset-sec",
+        type=float,
+        default=0.75,
+        help="Seconds to command the first CSV pose before each repeated pass.",
+    )
+    parser.add_argument(
+        "--ball-prim",
+        type=str,
+        default="/World/LMM/Ball",
+        help="Ball prim to reset before each playback pass.",
+    )
+    parser.add_argument(
+        "--head-prim",
+        type=str,
+        default="/World/LMM/Franka/lacrosse",
+        help="Optional explicit lacrosse head prim path used for ball reset.",
+    )
+    parser.add_argument(
+        "--ball-offset",
+        type=float,
+        default=0.10,
+        help="Ball reset height above lacrosse head top, in meters.",
+    )
     args = parser.parse_args()
+    if args.repeat < 0:
+        raise SystemExit("--repeat must be >= 0")
 
     if "SOFT_THROW_URDF" not in os.environ:
         _load_env_from_file(str(_ROOT / "env.sh"))
@@ -134,19 +174,6 @@ def main() -> int:
         DT_CONTROL,
         SIM_UPDATES_PER_STEP,
     )
-    from sim.isaac_scene import (
-        get_stage,
-        ensure_physics_scene,
-        spawn_ground,
-        spawn_lights,
-        add_robot_reference,
-        detect_franka_root,
-    )
-    from sim.isaac_robot_io import (
-        find_joint_paths,
-        apply_arm_targets,
-    )
-
     csv_path = Path(args.csv).expanduser()
     if not csv_path.is_file():
         raise SystemExit(f"CSV not found: {csv_path}")
@@ -158,16 +185,32 @@ def main() -> int:
         raise SystemExit("Need at least 2 samples to play back")
 
     from isaaclab.app import AppLauncher
-    import omni.timeline
 
     app_launcher = AppLauncher(headless=bool(args.headless))
     simulation_app = app_launcher.app
+
+    import omni.timeline
+    from sim.isaac_scene import (
+        get_stage,
+        ensure_physics_scene,
+        repair_lmm_asset_references,
+        spawn_ground,
+        spawn_lights,
+        add_robot_reference,
+        detect_franka_root,
+    )
+    from sim.isaac_robot_io import (
+        find_joint_paths,
+        apply_arm_targets,
+    )
+    from sim.show_asset_sim import _reset_ball_above_lacrosse_head
 
     stage = get_stage()
     ensure_physics_scene(stage)
     spawn_ground(stage)
     spawn_lights(stage)
     add_robot_reference(stage, ROBOT_PRIM, ROBOT_USD)
+    repair_lmm_asset_references(stage, ROBOT_PRIM)
 
     timeline = omni.timeline.get_timeline_interface()
     timeline.play()
@@ -180,23 +223,71 @@ def main() -> int:
 
     q0 = np.asarray(q[0], dtype=float).reshape(7)
 
-    # Reset/settle to the first CSV pose.
-    print(f"[reset] commanding q0 from {csv_path.name}: {np.round(q0, 6).tolist()}", flush=True)
-    t0 = time.time()
-    while time.time() - t0 < float(RESET_SETTLE_SEC):
-        apply_arm_targets(stage, joint_paths, q0, np.zeros(7, dtype=float))
-        for _ in range(int(SIM_UPDATES_PER_STEP)):
-            simulation_app.update()
+    repeat_count = 0 if bool(args.loop) else int(args.repeat)
+    repeat_label = "infinite" if repeat_count == 0 else str(repeat_count)
+    print(f"[play] samples={len(t)} dt={dt_play:g}s source={csv_path.name} repeat={repeat_label}", flush=True)
 
-    if not bool(args.auto_start):
-        input("[ready] arm set to first pose. Press Enter to start playback... ")
+    def _command_pose_for(seconds: float, q_cmd: np.ndarray) -> None:
+        t_start = time.time()
+        while time.time() - t_start < float(seconds):
+            apply_arm_targets(stage, joint_paths, q_cmd, np.zeros(7, dtype=float))
+            for _ in range(int(SIM_UPDATES_PER_STEP)):
+                simulation_app.update()
 
-    print(f"[play] samples={len(t)} dt={dt_play:g}s source={csv_path.name}", flush=True)
-    try:
+    def _wait_for_start_key(pass_index: int) -> bool:
+        print(f"[ready] pass={pass_index} Press Enter to play, q to quit", flush=True)
+        stdin_is_tty = bool(sys.stdin.isatty())
+        fd = sys.stdin.fileno()
+        old_settings = None
+        if stdin_is_tty:
+            old_settings = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+        try:
+            while True:
+                ready, _, _ = select.select([sys.stdin], [], [], 0.0)
+                if ready:
+                    key = sys.stdin.read(1) if stdin_is_tty else sys.stdin.readline()[:1]
+                    key = key.lower()
+                    if key in ("\r", "\n", " "):
+                        return True
+                    if key == "q":
+                        print("[ready] quit", flush=True)
+                        return False
+                simulation_app.update()
+                time.sleep(0.01)
+        finally:
+            if old_settings is not None:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    def _prepare_pass(pass_index: int, *, wait_for_key: bool) -> bool:
+        settle_sec = float(RESET_SETTLE_SEC if pass_index == 1 else args.repeat_reset_sec)
+        print(f"[reset] pass={pass_index} commanding q0 from {csv_path.name}: {np.round(q0, 6).tolist()}", flush=True)
+        _command_pose_for(settle_sec, q0)
+        _reset_ball_above_lacrosse_head(
+            stage,
+            ball_path=args.ball_prim,
+            head_path=args.head_prim,
+            offset_m=float(args.ball_offset),
+        )
+        if wait_for_key:
+            return _wait_for_start_key(pass_index)
+        return True
+
+    def _play_once(pass_index: int) -> None:
+        print(f"[play] pass={pass_index}", flush=True)
         for k in range(len(t)):
             apply_arm_targets(stage, joint_paths, q[k], dq[k])
             for _ in range(int(SIM_UPDATES_PER_STEP)):
                 simulation_app.update()
+
+    try:
+        pass_index = 1
+        while repeat_count == 0 or pass_index <= repeat_count:
+            wait_for_key = not (bool(args.auto_start) and pass_index == 1)
+            if not _prepare_pass(pass_index, wait_for_key=wait_for_key):
+                return 0
+            _play_once(pass_index)
+            pass_index += 1
     except KeyboardInterrupt:
         return 0
 

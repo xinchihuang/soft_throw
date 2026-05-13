@@ -5,14 +5,17 @@ import math
 import os
 from pathlib import Path
 
-import omni.usd
-import omni.timeline
-from pxr import Usd, UsdGeom, UsdPhysics, PhysxSchema, Gf
+from pxr import Usd, UsdGeom, UsdPhysics, PhysxSchema, Gf, Sdf
 
 try:
     from pxr import UsdLux
 except Exception:
     UsdLux = None
+
+try:
+    from pxr import UsdShade
+except Exception:
+    UsdShade = None
 
 from core.throw_params import (
     ROBOT_USD,
@@ -33,6 +36,8 @@ from core.throw_params import (
 
 
 def get_stage():
+    import omni.usd
+
     return omni.usd.get_context().get_stage()
 
 
@@ -59,6 +64,17 @@ def get_or_add_translate_op(xf: UsdGeom.Xformable) -> UsdGeom.XformOp:
         if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
             return op
     return xf.AddTranslateOp()
+
+
+def set_prim_translate(stage, prim_path: str, xyz, label: str = "prim"):
+    if not valid(stage, prim_path):
+        print(f"[scene] {label} not found for translate: {prim_path}", flush=True)
+        return False
+    prim = stage.GetPrimAtPath(prim_path)
+    op = get_or_add_translate_op(UsdGeom.Xformable(prim))
+    op.Set(Gf.Vec3d(float(xyz[0]), float(xyz[1]), float(xyz[2])))
+    print(f"[scene] {label} translate set: {prim_path} -> {tuple(float(v) for v in xyz)}", flush=True)
+    return True
 
 
 def spawn_lights(stage):
@@ -94,8 +110,28 @@ def ensure_physics_scene(stage):
     print("[scene] physicsScene created", flush=True)
 
 
-def spawn_ground(stage):
+def _bind_preview_surface_material(stage, prim, *, material_path: str, color):
+    if UsdShade is None:
+        return
+    if not valid(stage, "/World/Materials"):
+        stage.DefinePrim("/World/Materials", "Scope")
+    mat = UsdShade.Material.Define(stage, material_path)
+    shader = UsdShade.Shader.Define(stage, f"{material_path}/PreviewSurface")
+    shader.CreateIdAttr("UsdPreviewSurface")
+    shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*color))
+    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.8)
+    mat.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+    UsdShade.MaterialBindingAPI.Apply(prim).Bind(mat)
+
+
+def spawn_ground(stage, color=(0.42, 0.52, 0.45)):
     if valid(stage, "/World/Ground/Mesh"):
+        _bind_preview_surface_material(
+            stage,
+            stage.GetPrimAtPath("/World/Ground/Mesh"),
+            material_path="/World/Materials/Ground",
+            color=color,
+        )
         return
     stage.DefinePrim("/World/Ground", "Xform")
     mesh_prim = stage.DefinePrim("/World/Ground/Mesh", "Mesh")
@@ -114,6 +150,7 @@ def spawn_ground(stage):
 
     UsdPhysics.CollisionAPI.Apply(mesh_prim)
     PhysxSchema.PhysxCollisionAPI.Apply(mesh_prim)
+    _bind_preview_surface_material(stage, mesh_prim, material_path="/World/Materials/Ground", color=color)
     UsdGeom.Imageable(mesh_prim).MakeVisible()
     print("[scene] ground ready", flush=True)
 
@@ -138,10 +175,35 @@ def add_robot_reference(stage, prim_path: str = ROBOT_PRIM, usd_path: str = ROBO
     print(f"[scene] robot referenced: {prim_path}", flush=True)
 
 
+def has_panda_joints(stage, root_path: str) -> bool:
+    root = stage.GetPrimAtPath(root_path)
+    if not (root and root.IsValid()):
+        return False
+    stack = [root]
+    while stack:
+        prim = stack.pop()
+        if prim.GetName().startswith("panda_joint"):
+            return True
+        for child in prim.GetChildren():
+            stack.append(child)
+    return False
+
+
+def repair_lmm_asset_references(stage, root_path: str = ROBOT_PRIM):
+    """Best-effort local fallbacks for exported LMM USDs with remote/broken references."""
+    franka_root = os.environ.get("SOFT_THROW_FRANKA_ROOT", f"{root_path}/Franka")
+    local_franka = os.environ.get("SOFT_THROW_LOCAL_FRANKA_USD", "")
+    if local_franka and os.path.isfile(local_franka) and not has_panda_joints(stage, franka_root):
+        if not valid(stage, franka_root):
+            stage.DefinePrim(franka_root, "Xform")
+        stage.GetPrimAtPath(franka_root).GetReferences().AddReference("file://" + str(Path(local_franka).resolve()))
+        print(f"[scene] local Franka fallback referenced: {franka_root}", flush=True)
+
+
 def detect_franka_root(stage, want_root: str = FRANKA_ROOT) -> str:
     if valid(stage, want_root):
         return want_root
-    for cand in ["/World/LMM/Franka", "/World/Franka", "/World/LMM/franka", "/World/LMM/panda"]:
+    for cand in ["/World/LMM/Franka", "/World/Franka", "/World/LMM/franka", "/World/LMM/panda", "/World/LMM"]:
         if valid(stage, cand):
             return cand
     raise RuntimeError(f"[usd] Franka root not found under {want_root} and fallbacks")
